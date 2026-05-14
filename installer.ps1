@@ -27,4 +27,4 @@ Write-Host "Registering Windows service (requires elevated PowerShell and pywin3
 $python = (Get-Command python).Source
 $script = Join-Path $InstallRoot "blackbox_daemon.py"
 & $python $script install
-Write-Host "Service registered. Start with: sc start BlackBox   (or: net start BlackBox)"
+Write-Host "Service registered. Start with: sc start BlackBox (or: net start BlackBox)"
