@@ -1,314 +1,237 @@
-import io
-import json
-import logging
-import math
+# filename: module3_alerts.py
+# ============================================================
 import os
-import platform
-import threading
 import time
-from collections import deque
-from pathlib import Path
-from typing import Callable, Deque, Dict, List, Optional
-
+import logging
+import threading
+import configparser
+import platform
 import numpy as np
-from flask import Flask, Response, render_template, send_from_directory
-from flask_socketio import SocketIO
-
-logger = logging.getLogger("blackbox.alerts")
-
-try:
-    import pygame
-except Exception:
-    pygame = None
-
-try:
-    from pydub import AudioSegment
-    from pydub.playback import _play_with_simpleaudio
-
-    _HAS_PYDUB = True
-except Exception:
-    AudioSegment = None
-    _play_with_simpleaudio = None
-    _HAS_PYDUB = False
-
-try:
-    from win10toast import ToastNotifier
-except Exception:
-    ToastNotifier = None
+import io
 
 try:
     from plyer import notification
-except Exception:
+except ImportError:
     notification = None
 
+from flask import Flask, render_template, Response, request
+import pygame
+from pydub import AudioSegment
+from pydub.effects import compress_dynamic_range
 
-class ZakFrustrationCounter:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._value = 0
-        self._last_trigger = 0.0
-        self._burst_times: List[float] = []
+logger = logging.getLogger("BlackBox.Module3_Alerts")
 
-    def reset_if_idle(self, idle_seconds: float = 120.0) -> None:
-        now = time.monotonic()
-        with self._lock:
-            if now - self._last_trigger > idle_seconds:
-                self._value = 0
-                self._burst_times.clear()
+CONFIG_PATH = os.path.join(os.getcwd(), "config.ini")
+if not os.path.exists(CONFIG_PATH):
+    CONFIG_PATH = "C:\\BLACKBOX\\config.ini"
 
-    def increment_burst(self, window: float = 60.0) -> int:
-        now = time.monotonic()
-        with self._lock:
-            self._last_trigger = now
-            self._burst_times = [t for t in self._burst_times if now - t <= window]
-            self._burst_times.append(now)
-            if len(self._burst_times) >= 3:
-                self._value += 1
-            return len(self._burst_times)
+config = configparser.ConfigParser()
+config.read(CONFIG_PATH)
 
-    def value(self) -> int:
-        with self._lock:
-            return self._value
+app = Flask(__name__, template_folder="dashboard_templates")
+# Disable logging for Flask to avoid spam
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
-    def bump_minor(self) -> None:
-        with self._lock:
-            self._last_trigger = time.monotonic()
-            self._value += 1
+class SSEManager:
+    def __init__(self):
+        self.listeners = []
+        self.lock = threading.Lock()
 
+    def listen(self):
+        q = []
+        with self.lock:
+            self.listeners.append(q)
+        return q
 
-class AlertOrchestrator:
-    def __init__(
-        self,
-        audio_path: Path,
-        max_volume: int,
-        repeat_interval: int,
-        distortion_enabled: bool,
-        desktop_notifications: bool,
-        push_event: Callable[[Dict], None],
-        notify_critical: Callable[[], None],
-        internet_status: Callable[[], bool],
-    ) -> None:
-        self.audio_path = audio_path
-        self.max_volume = max(1, min(100, max_volume))
-        self.repeat_interval = repeat_interval
-        self.distortion_enabled = distortion_enabled
-        self.desktop_notifications = desktop_notifications
-        self.push_event = push_event
-        self.notify_critical = notify_critical
-        self.internet_status = internet_status
-        self._lock = threading.Lock()
-        self._last_play_times: List[float] = []
-        self._elf_repeat_stop = threading.Event()
-        self._elf_thread: Optional[threading.Thread] = None
-        self.zak = ZakFrustrationCounter()
-        if pygame:
-            try:
-                pygame.mixer.init()
-            except Exception as exc:
-                logger.warning("pygame mixer init failed: %s", exc)
-
-    def _recent_trigger_count(self) -> int:
-        now = time.monotonic()
-        with self._lock:
-            self._last_play_times = [t for t in self._last_play_times if now - t <= 10.0]
-            return len(self._last_play_times)
-
-    def _register_trigger(self) -> None:
-        with self._lock:
-            self._last_play_times.append(time.monotonic())
-
-    def _effective_volume(self, base_percent: int) -> int:
-        extra = min(40, self._recent_trigger_count() * 10)
-        vol = min(self.max_volume, base_percent + extra)
-        return vol
-
-    def _play_wav_windows_beep(self) -> None:
-        try:
-            import winsound
-
-            winsound.Beep(1000, 2000)
-        except Exception:
-            print("\a", flush=True)
-
-    def _process_audio(self, raw: bytes, speed: float, distort: bool) -> Optional[bytes]:
-        if not _HAS_PYDUB or AudioSegment is None:
-            return None
-        seg = AudioSegment.from_file(io.BytesIO(raw), format="wav")
-        if speed != 1.0:
-            seg = seg._spawn(seg.raw_data, overrides={"frame_rate": int(seg.frame_rate * speed)}).set_frame_rate(
-                seg.frame_rate
-            )
-        if distort and self.distortion_enabled:
-            samples = np.array(seg.get_array_of_samples()).astype(np.float32)
-            if seg.channels == 2:
-                samples = samples.reshape((-1, 2)).mean(axis=1)
-            gain = 6.0
-            clipped = np.clip(samples * gain, -32768, 32767).astype(np.int16)
-            seg = AudioSegment(
-                clipped.tobytes(),
-                frame_rate=seg.frame_rate,
-                sample_width=2,
-                channels=1,
-            )
-        buf = io.BytesIO()
-        seg.export(buf, format="wav")
-        return buf.getvalue()
-
-    def _play_once(self, percent: int) -> None:
-        def _runner() -> None:
-            counter_val = self.zak.value()
-            speed = 1.0
-            distort = False
-            if counter_val >= 6:
-                distort = True
-            elif 3 <= counter_val <= 5:
-                speed = 1.2
-            if self.audio_path.exists():
+    def announce(self, msg):
+        with self.lock:
+            for i in reversed(range(len(self.listeners))):
                 try:
-                    raw = self.audio_path.read_bytes()
-                    processed = self._process_audio(raw, speed, distort)
-                    if processed and pygame and pygame.mixer.get_init():
-                        snd = pygame.mixer.Sound(file=io.BytesIO(processed))
-                        vol = max(0.0, min(1.0, percent / 100.0))
-                        snd.set_volume(vol)
-                        snd.play()
-                    elif processed and _play_with_simpleaudio:
-                        seg = AudioSegment.from_file(io.BytesIO(processed), format="wav")
-                        gain_db = 10 * math.log10(max(percent, 1) / 100.0)
-                        play = seg + gain_db
-                        _play_with_simpleaudio(play)
-                    else:
-                        self._play_wav_windows_beep()
-                except Exception as exc:
-                    logger.warning("Audio playback failed: %s", exc)
-                    self._play_wav_windows_beep()
-            else:
-                self._play_wav_windows_beep()
+                    self.listeners[i].append(msg)
+                except Exception:
+                    del self.listeners[i]
 
-        threading.Thread(target=_runner, name="blackbox-audio", daemon=True).start()
+sse_manager = SSEManager()
+alert_system = None # Global reference for Flask
 
-    def _play_thread(self, percent: int, loop_elf: bool = False) -> None:
-        if loop_elf:
+@app.route('/')
+@app.route('/dashboard')
+def dashboard():
+    return render_template('index.html')
 
-            def _runner() -> None:
-                while not self._elf_repeat_stop.is_set():
-                    if self.internet_status():
-                        break
-                    self._play_once(percent)
-                    for _ in range(self.repeat_interval):
-                        if self._elf_repeat_stop.wait(1.0):
-                            return
-                    if self.internet_status():
-                        break
+@app.route('/blocked')
+def blocked():
+    return render_template('blocked.html')
 
-            threading.Thread(target=_runner, name="blackbox-audio-elf", daemon=True).start()
-            return
-        self._play_once(percent)
+@app.route('/stream')
+def stream():
+    def event_stream():
+        q = sse_manager.listen()
+        while True:
+            if len(q) > 0:
+                msg = q.pop(0)
+                yield f"data: {msg}\n\n"
+            time.sleep(0.1)
+    return Response(event_stream(), mimetype="text/event-stream")
 
-    def play_quarantine(self) -> None:
-        self.zak.reset_if_idle()
-        self._register_trigger()
-        self._play_thread(self._effective_volume(50), loop_elf=False)
-        self._emit_dashboard("FILE_QUARANTINE", "medium")
 
-    def play_dns_block(self) -> None:
-        self.zak.increment_burst()
-        self.zak.bump_minor()
-        self._register_trigger()
-        self._play_thread(self._effective_volume(60), loop_elf=False)
-        self._emit_dashboard("DNS_BLOCK", "medium")
+class AlertModule:
+    def __init__(self, daemon_state=None):
+        self.daemon_state = daemon_state or {"zak_frustration_counter": 0, "internet_enabled": True}
+        self.enabled = True
+        self.audio_file = config.get('Module3_Alerts', 'audio_file_path', fallback="C:\\ProgramData\\BlackBox\\assets\\cabbage_scream.wav")
+        self.port = config.getint('General', 'dashboard_port', fallback=8765)
+        
+        self.audio_thread = None
+        self.is_playing = False
+        self.play_lock = threading.Lock()
+        
+        pygame.mixer.init()
+        
+        # Pre-load audio if it exists, otherwise we'll fall back to beeps
+        self.has_audio = os.path.exists(self.audio_file)
+        if not self.has_audio:
+            logger.warning(f"Audio file not found: {self.audio_file}. Using system beep fallback.")
 
-    def start_elf_alarm(self) -> None:
-        self.zak.bump_minor()
-        self._register_trigger()
-        self._elf_repeat_stop.clear()
-        if self._elf_thread and self._elf_thread.is_alive():
-            return
+    def start(self):
+        logger.info("Starting Screaming Cabbage Alert System...")
+        global alert_system
+        alert_system = self
+        
+        # Start Flask dashboard
+        self.flask_thread = threading.Thread(target=self._run_flask, daemon=True)
+        self.flask_thread.start()
 
-        def _loop() -> None:
-            self._play_thread(self._effective_volume(75), loop_elf=True)
+    def stop(self):
+        logger.info("Stopping Alerts...")
+        # Flask is daemonized, it will die with the process.
 
-        self._elf_thread = threading.Thread(target=_loop, name="elf-alarm", daemon=True)
-        self._elf_thread.start()
-        self.notify_critical()
-        self._emit_dashboard("ELF_DETECTED", "critical")
-
-    def stop_elf_alarm(self) -> None:
-        self._elf_repeat_stop.set()
-
-    def _emit_dashboard(self, kind: str, severity: str) -> None:
-        self.push_event(
-            {
-                "type": kind,
-                "severity": severity,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-        )
-
-    def desktop_notify(self, title: str, message: str) -> None:
-        if not self.desktop_notifications:
-            return
+    def _run_flask(self):
         try:
-            if platform.system() == "Windows" and ToastNotifier:
-                ToastNotifier().show_toast(title, message, duration=8, threaded=True)
-            elif notification:
-                notification.notify(title=title, message=message, timeout=8)
-        except Exception as exc:
-            logger.warning("Desktop notification failed: %s", exc)
+            app.run(host="0.0.0.0", port=self.port, use_reloader=False, threaded=True)
+        except Exception as e:
+            logger.error(f"Flask dashboard failed: {e}")
 
+    def trigger(self, event_type, details, counter):
+        # Determine volume and playback logic based on event and counter
+        volume = 0.5
+        repeat = False
+        
+        if event_type == "FILE_QUARANTINE":
+            volume = 0.5
+        elif event_type == "DNS_BLOCK":
+            volume = 0.6
+        elif event_type == "ELF_DETECTED":
+            volume = 0.75
+            repeat = True
+            
+        # Scaling based on frustration
+        if counter > 1:
+            volume += (counter * 0.1)
+        volume = min(1.0, volume)
+        
+        # Trigger UI update
+        import json
+        event_data = {
+            "type": event_type,
+            "details": details,
+            "counter": counter,
+            "internet": self.daemon_state.get("internet_enabled", True)
+        }
+        sse_manager.announce(json.dumps(event_data))
 
-def create_dashboard_app(template_folder: Path) -> Flask:
-    return Flask(__name__, template_folder=str(template_folder))
+        # Desktop Notification
+        if config.getboolean('Module3_Alerts', 'desktop_notifications', fallback=True):
+            self._send_notification(event_type, details)
 
+        # Audio Playback
+        if not self.is_playing:
+            threading.Thread(target=self._play_audio, args=(volume, counter, repeat), daemon=True).start()
 
-def register_routes(
-    app: Flask,
-    socketio: SocketIO,
-    events_provider: Callable[[], Deque[Dict]],
-    status_provider: Callable[[], Dict],
-    assets_dir: Path,
-) -> None:
-    @app.route("/dashboard")
-    def dashboard() -> str:
-        return render_template("index.html")
+    def _send_notification(self, event_type, details):
+        if notification:
+            try:
+                notification.notify(
+                    title=f"⚠️ BLACK BOX ALERT: {event_type}",
+                    message="Check dashboard for details.",
+                    app_name="BlackBox Security"
+                )
+            except Exception as e:
+                logger.debug(f"Notification failed (expected if Session 0): {e}")
 
-    @app.route("/blocked")
-    def blocked_page() -> str:
-        video_path = assets_dir / "safety.mp4"
-        exists = video_path.exists()
-        if exists:
-            body = (
-                "<video autoplay loop muted playsinline>"
-                "<source src='/static/safety.mp4' type='video/mp4'></video>"
-                "<h1>Safety Training: Why We Don't Visit Phishing Sites</h1>"
-            )
+    def _apply_distortion(self, sound_segment, counter):
+        # Uses numpy and pydub to overdrive/distort the audio
+        samples = np.array(sound_segment.get_array_of_samples())
+        # Overdrive: multiply amplitude and clip
+        gain = 1.0 + (counter * 0.5)
+        samples = samples * gain
+        
+        # Hard clipping
+        max_val = (2**(sound_segment.sample_width * 8 - 1)) - 1
+        np.clip(samples, -max_val, max_val, out=samples)
+        
+        return sound_segment._spawn(samples.astype(np.int16).tobytes())
+
+    def _play_audio(self, volume, counter, repeat):
+        with self.play_lock:
+            self.is_playing = True
+            
+            try:
+                if not self.has_audio:
+                    self._fallback_beep()
+                    time.sleep(1)
+                    return
+
+                # Load with pydub for effects
+                sound = AudioSegment.from_wav(self.audio_file)
+                
+                # Speed up if counter 3-5
+                if 3 <= counter <= 5:
+                    sound = sound.speedup(playback_speed=1.2)
+                    
+                # Distort if counter 6+
+                if counter >= 6:
+                    sound = self._apply_distortion(sound, counter)
+
+                # Export to memory and load into pygame
+                f = io.BytesIO()
+                sound.export(f, format="wav")
+                f.seek(0)
+                
+                pg_sound = pygame.mixer.Sound(f)
+                pg_sound.set_volume(volume)
+                
+                if repeat:
+                    pg_sound.play(loops=-1) # infinite loop
+                else:
+                    pg_sound.play()
+                    
+                # Wait for playback to finish if not repeating
+                if not repeat:
+                    while pygame.mixer.get_busy():
+                        time.sleep(0.1)
+
+            except Exception as e:
+                logger.error(f"Audio playback error: {e}")
+                self._fallback_beep()
+            finally:
+                if not repeat:
+                    self.is_playing = False
+
+    def _fallback_beep(self):
+        if platform.system() == "Windows":
+            import winsound
+            winsound.Beep(1000, 2000)
         else:
-            body = "<div class='block-msg'>BLOCKED BY BLACK BOX</div>"
-        return (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Blocked</title>"
-            "<style>body{font-family:Segoe UI,Arial;background:#111;color:#eee;text-align:center;padding:2rem;}"
-            "video{max-width:90vw;max-height:70vh;border:3px solid #c00;}"
-            ".block-msg{color:#f44;font-size:3rem;font-weight:bold;margin-top:2rem;}"
-            "</style></head><body>"
-            + body
-            + "<p>This page was shown because the domain was blocked by Black Box parental filtering.</p>"
-            + "</body></html>"
-        )
+            print('\a') # Terminal bell
 
-    @app.route("/static/safety.mp4")
-    def safety_video():
-        return send_from_directory(str(assets_dir), "safety.mp4", conditional=True)
-
-    @app.route("/events")
-    def events_stream():
-        def gen():
-            while True:
-                payload = {"events": list(events_provider()), "status": status_provider()}
-                yield "data: " + json.dumps(payload) + "\n\n"
-                time.sleep(1.0)
-
-        return Response(gen(), mimetype="text/event-stream")
-
-    @socketio.on("connect")
-    def _connect():  # type: ignore[no-untyped-def]
-        socketio.emit("status", status_provider())
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    mod = AlertModule()
+    mod.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        mod.stop()
