@@ -1,33 +1,95 @@
-param(
-    [string]$InstallRoot = "C:\ProgramData\BlackBox",
-    [string]$SourceDir = $PSScriptRoot
-)
+# filename: installer.ps1
+# ============================================================
+<#
+.SYNOPSIS
+Installs and configures the Black Box Parental Security Suite.
 
-$ErrorActionPreference = "Stop"
+.DESCRIPTION
+This script sets up the required directories, permissions, Python dependencies,
+and creates the NSSM service for the Black Box daemon. Must be run as Administrator.
+#>
 
-Write-Host "BLACK BOX installer - creating directories and copying configuration."
+# Require Admin
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "Please run this script as an Administrator!"
+    Exit
+}
 
-New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "logs") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "config") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "assets") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "Quarantine") | Out-Null
+$InstallDir = "C:\BLACKBOX"
+$ProgramDataDir = "C:\ProgramData\BlackBox"
+$PythonExec = "python" # Assume Python is in PATH
+$NSSMUrl = "https://nssm.cc/release/nssm-2.24.zip"
+$NSSMZip = "$env:TEMP\nssm.zip"
+$NSSMExe = "$InstallDir\nssm.exe"
 
-Copy-Item -Force (Join-Path $SourceDir "config.ini") (Join-Path $InstallRoot "config.ini")
-Get-ChildItem -Path $SourceDir -Filter "*.py" | Copy-Item -Destination $InstallRoot -Force
-Copy-Item -Recurse -Force (Join-Path $SourceDir "dashboard_templates") (Join-Path $InstallRoot "dashboard_templates")
+Write-Host "=== BLACK BOX INSTALLER ===" -ForegroundColor Cyan
 
-attrib +h (Join-Path $InstallRoot "Quarantine")
+# 1. Setup Directories
+Write-Host "Creating directories..."
+New-Item -Path "$ProgramDataDir\logs" -ItemType Directory -Force | Out-Null
+New-Item -Path "$ProgramDataDir\secret" -ItemType Directory -Force | Out-Null
+New-Item -Path "$ProgramDataDir\Quarantine" -ItemType Directory -Force | Out-Null
+New-Item -Path "$ProgramDataDir\assets" -ItemType Directory -Force | Out-Null
+New-Item -Path "$ProgramDataDir\config" -ItemType Directory -Force | Out-Null
 
-Write-Host "Installing Python dependencies (requires Python 3.10+ on PATH)."
-python -m pip install --upgrade pip
-python -m pip install -r (Join-Path $SourceDir "requirements.txt")
+# Hide the Quarantine directory
+attrib +h +s "$ProgramDataDir\Quarantine"
 
-Write-Host "Registering Windows service (requires elevated PowerShell and pywin32)."
+# 2. Secure Secret Directory
+Write-Host "Securing secret directory..."
+$Acl = Get-Acl "$ProgramDataDir\secret"
+$Acl.SetAccessRuleProtection($true, $false) # Disable inheritance
+$RuleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM","FullControl","ContainerInherit,ObjectInherit","None","Allow")
+$RuleAdmin = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators","FullControl","ContainerInherit,ObjectInherit","None","Allow")
+$Acl.AddAccessRule($RuleSystem)
+$Acl.AddAccessRule($RuleAdmin)
+Set-Acl "$ProgramDataDir\secret" $Acl
 
-$python = (Get-Command python).Source
-$script = Join-Path $InstallRoot "blackbox_daemon.py"
+# 3. Install Python Dependencies
+Write-Host "Installing Python Dependencies..."
+Start-Process -FilePath $PythonExec -ArgumentList "-m pip install -r $InstallDir\requirements.txt" -Wait -NoNewWindow
 
-& $python $script install
+# 4. Download and configure NSSM
+if (-not (Test-Path $NSSMExe)) {
+    Write-Host "Downloading NSSM..."
+    Invoke-WebRequest -Uri $NSSMUrl -OutFile $NSSMZip
+    Expand-Archive -Path $NSSMZip -DestinationPath "$env:TEMP\nssm_extracted" -Force
+    
+    # Check Architecture
+    if ([Environment]::Is64BitOperatingSystem) {
+        Copy-Item "$env:TEMP\nssm_extracted\nssm-2.24\win64\nssm.exe" -Destination $NSSMExe -Force
+    } else {
+        Copy-Item "$env:TEMP\nssm_extracted\nssm-2.24\win32\nssm.exe" -Destination $NSSMExe -Force
+    }
+    Remove-Item $NSSMZip -Force
+    Remove-Item "$env:TEMP\nssm_extracted" -Recurse -Force
+}
 
-Write-Host "Service registered. Start with: sc start BlackBox (or: net start BlackBox)"
+# 5. Create Windows Service
+$ServiceName = "BlackBoxDaemon"
+Write-Host "Configuring Windows Service ($ServiceName)..."
+
+# Stop and remove existing if present
+$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($service) {
+    Stop-Service -Name $ServiceName -Force
+    & $NSSMExe remove $ServiceName confirm
+}
+
+# Install new service
+& $NSSMExe install $ServiceName $PythonExec "$InstallDir\blackbox_daemon.py" "--start"
+& $NSSMExe set $ServiceName AppDirectory $InstallDir
+& $NSSMExe set $ServiceName DisplayName "Black Box Security Daemon"
+& $NSSMExe set $ServiceName Description "Parental security suite enforcing ZAK-TRAP protocols."
+& $NSSMExe set $ServiceName Start SERVICE_AUTO_START
+
+# Configure DNS Sinkhole fallback (flushing cache)
+Write-Host "Flushing DNS Cache to prepare for sinkhole interception..."
+ipconfig /flushdns | Out-Null
+
+Write-Host "`nInstallation Complete!" -ForegroundColor Green
+Write-Host "Note: To test audio and notifications properly during development,"
+Write-Host "do NOT start the service yet. Instead, run:" -ForegroundColor Yellow
+Write-Host "python $InstallDir\blackbox_daemon.py --start" -ForegroundColor Yellow
+Write-Host "`nTo run as a background service (no desktop popups):"
+Write-Host "Start-Service $ServiceName"
