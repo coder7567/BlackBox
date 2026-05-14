@@ -33,6 +33,7 @@ try:
     from module2_dns import DNSModule
     from module3_alerts import AlertModule
     from module4_vm import VMModule
+    from block_server import BlockServerModule
 except ImportError as e:
     logger.error(f"Failed to import modules. Ensure all modules are in the same directory. {e}")
     # Don't exit here, allows testing partial builds
@@ -134,6 +135,9 @@ class BlackBoxDaemon:
             
             self.vm_module = VMModule(daemon_state=self.state)
             self.modules.append(("VM Monitor", self.vm_module))
+            
+            self.block_server_module = BlockServerModule()
+            self.modules.append(("Block Server", self.block_server_module))
         except NameError as e:
             logger.error(f"Module init failed: {e}")
             
@@ -154,12 +158,15 @@ class BlackBoxDaemon:
                             logger.info("Resetting Frustration Counter (No events for 2 mins).")
                             self.state["zak_frustration_counter"] = 0
                             
-                # Check thread health
-                for i, t in enumerate(self.threads):
-                    if not t.is_alive():
-                        name = self.modules[i][0]
-                        logger.error(f"Thread for {name} died. Attempting restart...")
-                        # In a full implementation, we'd recreate the thread here
+                # Check module health via internal flags instead of thread life
+            for name, mod in self.modules:
+                # We check if the module has a 'running' attribute and if it's False
+                # We skip VM Monitor if it was intentionally disabled
+                if hasattr(mod, 'running') and not mod.running:
+                    if name == "VM Monitor" and not self.state.get("vbox_available", True):
+                        continue 
+                    logger.error(f"Module {name} is not reporting as running. Attempting restart...")
+            
         except KeyboardInterrupt:
             logger.info("Daemon interrupted by user.")
             self.stop()
