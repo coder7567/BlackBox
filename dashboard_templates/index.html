@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Black Box — Mission Dashboard</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #0a1020;
+      --panel: #121c33;
+      --accent: #00d4ff;
+      --warn: #ffb020;
+      --danger: #ff3355;
+      --text: #e8eefc;
+      --muted: #7a8aa6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+      background: radial-gradient(1200px 600px at 10% 0%, #132042 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid #223355;
+      background: linear-gradient(90deg, rgba(0,212,255,0.08), transparent);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .brand-badge {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 12px var(--accent);
+    }
+    .tagline { font-size: 0.75rem; color: var(--muted); letter-spacing: 0.2em; }
+    main { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; padding: 1rem 1.5rem 2rem; }
+    @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+    .panel {
+      background: var(--panel);
+      border: 1px solid #223355;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+    }
+    .panel h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.75rem;
+    }
+    .metric {
+      background: #0c1428;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      border: 1px solid #1f2d4d;
+    }
+    .metric label { display: block; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+    .metric .value { font-size: 1.35rem; font-weight: 600; margin-top: 0.25rem; }
+    .value.on { color: #4cff9e; }
+    .value.off { color: var(--danger); }
+    .feed {
+      max-height: 520px;
+      overflow-y: auto;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.8rem;
+    }
+    .feed-row {
+      padding: 0.45rem 0.5rem;
+      border-bottom: 1px solid #1a2540;
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+    .sev-critical { color: var(--danger); font-weight: 700; }
+    .sev-medium { color: var(--warn); }
+    .banner {
+      display: none;
+      margin: 0 1.5rem 0;
+      padding: 0.65rem 1rem;
+      background: repeating-linear-gradient(-45deg, #4a0000, #4a0000 10px, #700010 10px, #700010 20px);
+      color: #fff;
+      font-weight: 700;
+      text-align: center;
+      animation: flash 1s infinite;
+      border-radius: 4px;
+    }
+    .banner.show { display: block; }
+    @keyframes flash { 0%,100%{opacity:1;} 50%{opacity:0.65;} }
+  </style>
+</head>
+<body>
+  <div id="critBanner" class="banner">CRITICAL THREAT — ELF OR SUSTAINED BLOCKS DETECTED</div>
+  <header>
+    <div>
+      <div class="brand"><span class="brand-badge"></span> Black Box</div>
+      <div class="tagline">Parental Security Suite — Flight Deck</div>
+    </div>
+    <div style="text-align:right;font-size:0.8rem;color:var(--muted);">
+      Collins-style situational display (mock)<br/>
+      Localhost only — not for airworthiness
+    </div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>Live Security Event Feed (last 20)</h2>
+      <div id="feed" class="feed"></div>
+    </section>
+    <aside>
+      <section class="panel" style="margin-bottom:1rem;">
+        <h2>Subsystem Status</h2>
+        <div class="metrics">
+          <div class="metric">
+            <label>Zak Frustration Counter</label>
+            <div id="zak" class="value">0</div>
+          </div>
+          <div class="metric">
+            <label>Internet</label>
+            <div id="inet" class="value on">ON</div>
+          </div>
+          <div class="metric">
+            <label>Snapshot</label>
+            <div id="snap" class="value">clean</div>
+          </div>
+          <div class="metric">
+            <label>DNS blocks / 60s</label>
+            <div id="dns60" class="value">0</div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Automation</h2>
+        <p style="font-size:0.85rem;color:var(--muted);margin:0;">
+          Streams update every second via Server-Sent Events. Critical alerts also use Socket.IO for instant browser signaling.
+        </p>
+      </section>
+    </aside>
+  </main>
+  <script>
+    const feed = document.getElementById('feed');
+    const zakEl = document.getElementById('zak');
+    const inetEl = document.getElementById('inet');
+    const snapEl = document.getElementById('snap');
+    const dns60El = document.getElementById('dns60');
+    const banner = document.getElementById('critBanner');
+
+    function render(payload) {
+      const st = payload.status || {};
+      zakEl.textContent = st.zak_counter ?? 0;
+      inetEl.textContent = st.internet || 'ON';
+      inetEl.className = 'value ' + (st.internet === 'OFF' ? 'off' : 'on');
+      snapEl.textContent = st.snapshot || 'unknown';
+      dns60El.textContent = st.dns_blocks_60s ?? 0;
+      if (st.critical) {
+        banner.classList.add('show');
+        try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.value = 0.05; o.start(); o.stop(ctx.currentTime + 0.15); } catch (e) {}
+      } else {
+        banner.classList.remove('show');
+      }
+      feed.innerHTML = '';
+      (payload.events || []).forEach(ev => {
+        const row = document.createElement('div');
+        row.className = 'feed-row';
+        const sev = (ev.severity === 'critical') ? 'sev-critical' : (ev.severity === 'medium' ? 'sev-medium' : '');
+        row.innerHTML = '<span class="'+sev+'">'+(ev.type||'')+'</span><span style="color:#7a8aa6">'+(ev.timestamp||'')+'</span>';
+        feed.appendChild(row);
+      });
+    }
+
+    const es = new EventSource('/events');
+    es.onmessage = (e) => {
+      try { render(JSON.parse(e.data)); } catch (err) { console.error(err); }
+    };
+    es.onerror = () => { /* SSE reconnects automatically in most browsers */ };
+
+    const sock = io({ transports: ['websocket', 'polling'] });
+    sock.on('critical', () => {
+      banner.classList.add('show');
+      try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 1200; g.gain.value = 0.06; o.start(); o.stop(ctx.currentTime + 0.12); } catch (e) {}
+    });
+  </script>
+</body>
+</html>
