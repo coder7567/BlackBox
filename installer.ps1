@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "BLACK BOX installer — creating directories and copying configuration."
+Write-Host "BLACK BOX installer - creating directories and copying configuration."
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $InstallRoot "logs") | Out-Null
@@ -24,7 +24,10 @@ python -m pip install --upgrade pip
 python -m pip install -r (Join-Path $SourceDir "requirements.txt")
 
 Write-Host "Registering Windows service (requires elevated PowerShell and pywin32)."
+
 $python = (Get-Command python).Source
 $script = Join-Path $InstallRoot "blackbox_daemon.py"
+
 & $python $script install
+
 Write-Host "Service registered. Start with: sc start BlackBox (or: net start BlackBox)"
