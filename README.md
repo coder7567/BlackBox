@@ -1,71 +1,81 @@
-# Black Box — Parental Security Suite
+# Black Box Parental Security Suite - "Dad Guide"
 
-Black Box is a Windows-first parental security tool that watches sensitive download folders, blocks risky DNS names, plays attention-getting alerts, and can reset a dedicated study virtual machine after serious events.
+Welcome to the **Black Box Security Suite**. This tool is designed to provide ironclad protection, active monitoring, and automatic recovery protocols to ensure a safe digital environment.
 
-## What you need
+## 1. What does this do?
+Black Box runs silently in the background of Windows and monitors four main things:
+1. **ZAK-TRAP (File Monitoring)**: Watches the `Downloads` and `Desktop` folders. If a blocked file type (like `.exe`, `.bat`, or an invisible Linux executable) is downloaded, it instantly locks the file in a hidden Quarantine folder. If a serious threat is detected, it **cuts the internet** immediately.
+2. **Linn-Mar Shield (DNS Protection)**: Blocks access to known malicious websites and catches "typosquatting" (e.g., if someone tries to go to `g00gle.com` instead of `google.com`). Blocked sites show a safety warning video.
+3. **Screaming Cabbage (Alarms)**: Plays an increasingly distorted alarm sound if rules are repeatedly broken, and logs every event to a local web dashboard.
+4. **Snapshot Protocol (Auto-Recovery)**: If a virus is detected or too many rules are broken, it automatically force-quits the Virtual Machine and rolls it back to a clean state.
 
-- A Windows 10 or 11 PC (other systems are only partially supported).
-- Python 3.10 or newer installed from python.org, with “Add Python to PATH” turned on.
-- Administrator rights when you enable the DNS proxy or automatic internet lockout, because those features change firewall rules or bind to port 53.
+---
 
-## Quick setup for parents
+## 2. Installation
 
-1. Copy the entire `blackbox` folder somewhere permanent, for example `C:\Tools\blackbox`.
-2. Open **PowerShell as Administrator**, go to that folder, and run:
-
+1. Open **PowerShell as an Administrator** (Right-click Start -> Windows PowerShell (Admin)).
+2. Navigate to this folder:
    ```powershell
-   Set-ExecutionPolicy -Scope Process Bypass
+   cd C:\BLACKBOX
+   ```
+3. Run the installer script:
+   ```powershell
    .\installer.ps1
    ```
+   *Note: If Windows complains about script execution policies, run `Set-ExecutionPolicy RemoteSigned` first.*
 
-   This creates `C:\ProgramData\BlackBox\`, copies configuration and scripts, installs Python packages, and registers the optional Windows service **BlackBox** (if pywin32 is available).
+The installer will download required Python libraries and install Black Box as a Windows Service.
 
-3. Edit `C:\ProgramData\BlackBox\config.ini` in Notepad. At minimum, set `[General]` `user_home` to your child’s profile path if it is not already correct, and review `[Module4_VM]` if you use VirtualBox snapshots.
+---
 
-4. Place optional media files:
+## 3. How to Run It
 
-   - `C:\ProgramData\BlackBox\assets\cabbage_scream.wav` — alarm sound.
-   - `C:\ProgramData\BlackBox\assets\safety.mp4` — short clip shown on blocked DNS pages.
-
-5. Start the daemon (foreground, good for testing):
-
-   ```powershell
-   cd C:\ProgramData\BlackBox
-   python blackbox_daemon.py --start
-   ```
-
-   Keep this window open while testing. For production, prefer the Windows service after `python blackbox_daemon.py install` and `sc start BlackBox`.
-
-6. Open the dashboard in a browser: `http://localhost:8765/dashboard`
-
-## Everyday commands
-
-| Command | Meaning |
-| --- | --- |
-| `python blackbox_daemon.py --start` | Run all modules (file watcher, DNS helper, alerts, web dashboard). |
-| `python blackbox_daemon.py --stop` | Ask a running instance to exit (uses the pid file). |
-| `python blackbox_daemon.py --status` | Show whether Black Box thinks it is running. |
-| `python blackbox_daemon.py --restore-internet` | Manually remove the emergency outbound block rule after an ELF event. |
-| `python blackbox_daemon.py --view-logs` | Decrypt the chain-of-custody log after you enter the master password from `config.ini`. |
-
-The separate viewer also works:
-
-```powershell
-python blackbox_viewer.py --decrypt --output C:\ProgramData\BlackBox\logs\report.txt
+### Option A: Interactive Mode (Best for Testing)
+To see the alerts on your screen and hear the audio properly, run the daemon manually in an Admin command prompt:
+```cmd
+cd C:\BLACKBOX
+python blackbox_daemon.py --start
 ```
+Leave that black window open. As long as it is open, the system is protected.
 
-## Safety and privacy
+### Option B: Silent Background Service (Set-and-Forget)
+If you want it to run invisibly every time the computer turns on (note: audio and desktop popups might not work in this mode due to Windows security, but the internet blocking and file quarantine will still work perfectly):
+1. Open Services (`services.msc`).
+2. Find **Black Box Security Daemon**.
+3. Right-click and choose **Start**.
 
-- Lists of bad domains are downloaded from public blocklist feeds and cached under `C:\ProgramData\BlackBox\`. No telemetry or “phone home” beyond those list URLs is built into this code.
-- Internet cut-off uses a Windows Firewall outbound block rule named `BlackBox_Block_All`. Removing the rule or using `--restore-internet` puts connectivity back.
-- Virtual machine reset is powerful: unsaved work inside the VM is lost. Only enable `[Module4_VM]` if you understand that trade-off.
+---
 
-## Troubleshooting
+## 4. The Dashboard
+Open a web browser and go to:
+**http://localhost:8765/dashboard**
 
-- **No DNS blocking:** confirm PowerShell was elevated; port 53 must be free. Without admin rights, Black Box falls back to editing the `hosts` file marker block only.
-- **No sound:** install the WAV file above, or the code falls back to Windows beeps.
-- **Service will not start:** check `C:\ProgramData\BlackBox\logs\crash.log`.
+Here you can see a live feed of all security events, the "Frustration Counter", and the status of the internet uplink.
 
-## Legal notice
+---
 
-This software is aggressive by design (quarantine, firewall blocks, VM power-off). Only deploy it on hardware you own and where you have informed consent from all users. The authors are not responsible for misuse.
+## 5. Reviewing the Logs (Chain of Custody)
+Every time Black Box does something, it logs it securely using military-grade encryption so it cannot be tampered with.
+
+To read the logs, open a Command Prompt and type:
+```cmd
+cd C:\BLACKBOX
+python blackbox_daemon.py --view-logs
+```
+It will ask you for the Master Password.
+**(Default Password: `BlackBoxSupervisor2026!`)**
+
+It will decrypt the logs and save them to a file called `report.txt` in the same folder for you to read.
+
+---
+
+## 6. Fixing the Internet
+If the system detects an ELF file, it will **shut down the internet** for 5 minutes.
+If you need to turn the internet back on manually, run:
+```cmd
+python blackbox_daemon.py --restore-internet
+```
+Or open an Admin Command Prompt and type:
+```cmd
+netsh advfirewall firewall delete rule name="BlackBox_Block_All"
+```
