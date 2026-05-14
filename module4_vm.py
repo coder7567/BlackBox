@@ -1,195 +1,135 @@
+# filename: module4_vm.py
+# ============================================================
+import os
+import time
+import subprocess
 import logging
 import platform
-import subprocess
+import configparser
 import threading
-import time
-from pathlib import Path
-from typing import Callable, List, Optional
+from chain_of_custody import log_event
 
-from tenacity import retry, stop_after_attempt, wait_fixed
+logger = logging.getLogger("BlackBox.Module4_VM")
 
-from chain_of_custody import ChainOfCustodyLogger
+CONFIG_PATH = os.path.join(os.getcwd(), "config.ini")
+if not os.path.exists(CONFIG_PATH):
+    CONFIG_PATH = "C:\\BLACKBOX\\config.ini"
 
-logger = logging.getLogger("blackbox.vm")
+config = configparser.ConfigParser()
+config.read(CONFIG_PATH)
 
+class VMModule:
+    def __init__(self, daemon_state=None):
+        self.daemon_state = daemon_state
+        self.enabled = config.getboolean('Module4_VM', 'enabled', fallback=True)
+        self.platform = config.get('Module4_VM', 'platform', fallback='virtualbox')
+        self.vm_name = config.get('Module4_VM', 'vm_name', fallback='Zak-VM')
+        self.clean_snapshot = config.get('Module4_VM', 'clean_snapshot', fallback='Clean-Baseline')
+        self.safety_delay = config.getint('Module4_VM', 'snapshot_restore_delay_seconds', fallback=30)
+        
+        self.vm_running = False
+        self.check_thread = None
+        self.lock = threading.Lock()
+        
+        # Verify vboxmanage is in PATH
+        if self.platform == 'virtualbox':
+            try:
+                subprocess.run(['vboxmanage', '--version'], capture_output=True, check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                logger.error("vboxmanage not found in PATH or failed to execute. Disabling VM Module.")
+                self.enabled = False
 
-def which_or_path(name: str, configured: str) -> str:
-    if configured and Path(configured).exists():
-        return configured
-    return name
-
-
-def list_running_vbox(vbox: str) -> List[str]:
-    try:
-        out = subprocess.run(
-            [vbox, "list", "runningvms"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
-    except FileNotFoundError:
-        return []
-
-
-def list_vmware_running(vmrun: str) -> List[str]:
-    try:
-        out = subprocess.run(
-            [vmrun, "list"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
-    except FileNotFoundError:
-        return []
-
-
-def snapshot_list_vbox(vbox: str, vm_name: str) -> str:
-    out = subprocess.run(
-        [vbox, "snapshot", vm_name, "list"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return out.stdout + out.stderr
-
-
-class VMController:
-    def __init__(self, cfg, coc: ChainOfCustodyLogger, on_disabled: Callable[[str], None], notify: Callable[[str, str], None]) -> None:
-        self.cfg = cfg
-        self.coc = coc
-        self.on_disabled = on_disabled
-        self.notify = notify
-        self._lock = threading.Lock()
-        self.auto_reset_disabled = False
-        self.platform_name = cfg.get("Module4_VM", "platform", fallback="virtualbox")
-        self.vm_name = cfg.get("Module4_VM", "vm_name", fallback="Zak-VM").strip('"')
-        self.snapshot = cfg.get("Module4_VM", "clean_snapshot", fallback="Clean-Baseline").strip('"')
-        self.delay = int(cfg.get("Module4_VM", "snapshot_restore_delay_seconds", fallback="30"))
-        self.force_kill = cfg.getboolean("Module4_VM", "force_vm_kill", fallback=True)
-        self.vbox = which_or_path("VBoxManage", cfg.get("Module4_VM", "vboxmanage_path", fallback=""))
-        self.vmrun = which_or_path("vmrun", "")
-
-    def _write_event_log_windows(self, message: str) -> None:
-        if platform.system() != "Windows":
-            logger.error("VM failure (non-Windows event log): %s", message)
+    def start(self):
+        if not self.enabled:
+            logger.info("VM Module disabled.")
             return
-        try:
-            subprocess.run(
-                [
-                    "eventcreate",
-                    "/ID",
-                    "1001",
-                    "/L",
-                    "APPLICATION",
-                    "/T",
-                    "ERROR",
-                    "/SO",
-                    "BlackBox",
-                    "/D",
-                    message[:1024],
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except Exception:
-            logger.error("VM failure (event log unavailable): %s", message)
+            
+        logger.info("Starting Snapshot Protocol (VM Monitor)...")
+        self.check_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.check_thread.start()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5), reraise=False)
-    def _vbox_poweroff(self) -> None:
-        subprocess.run(
-            [self.vbox, "controlvm", self.vm_name, "poweroff"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    def stop(self):
+        logger.info("Stopping VM Module...")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5), reraise=False)
-    def _vbox_restore(self) -> None:
-        subprocess.run(
-            [self.vbox, "snapshot", self.vm_name, "restore", self.snapshot],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    def _monitor_loop(self):
+        while True:
+            try:
+                # Check if target VM is running
+                if self.platform == 'virtualbox':
+                    result = subprocess.run(['vboxmanage', 'list', 'runningvms'], capture_output=True, text=True)
+                    self.vm_running = self.vm_name in result.stdout
+                    
+                    if self.daemon_state:
+                        self.daemon_state["vm_infected"] = False # Reset state assumption based on running
+            except Exception as e:
+                logger.error(f"VM monitor error: {e}")
+                
+            time.sleep(10)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5), reraise=False)
-    def _vbox_start(self) -> None:
-        subprocess.run(
-            [self.vbox, "startvm", self.vm_name, "--type", "headless"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    def trigger_restore(self, reason):
+        if not self.enabled:
+            return
+            
+        with self.lock:
+            # We restore whether it's running or not (might be paused or saved)
+            logger.critical(f"TRIGGERING VM RESTORE. Reason: {reason}")
+            
+            if self.daemon_state:
+                self.daemon_state["vm_infected"] = True
+            
+            success = self._execute_restore()
+            
+            if success:
+                log_event("VM_RESTORE", {
+                    "trigger_details": reason,
+                    "target_vm": self.vm_name,
+                    "snapshot": self.clean_snapshot
+                })
+                logger.info(f"Applying safety delay of {self.safety_delay}s before allowing internet restore...")
+                time.sleep(self.safety_delay)
+                # Internet restore is handled by the orchestrator/EDR module, 
+                # but we enforce a sleep here so the orchestrator thread calling this blocks.
 
-    def validate_configuration(self) -> bool:
-        if not self.cfg.getboolean("Module4_VM", "enabled", fallback=True):
-            return False
-        if self.platform_name.lower() != "virtualbox":
-            logger.info("VM platform %s not fully implemented; VirtualBox path used.", self.platform_name)
-        try:
-            listing = snapshot_list_vbox(self.vbox, self.vm_name)
-        except FileNotFoundError:
-            logger.warning("VBoxManage not found in PATH.")
-            return False
-        if self.snapshot not in listing:
-            logger.error("Snapshot %s not found for VM %s", self.snapshot, self.vm_name)
-            return False
-        return True
-
-    def detect_running_vm(self) -> bool:
-        if self.platform_name.lower() == "virtualbox":
-            running = list_running_vbox(self.vbox)
-            return any(self.vm_name in line for line in running)
-        running = list_vmware_running(self.vmrun)
-        return any(self.vm_name in line for line in running)
-
-    def maybe_skip(self) -> bool:
-        if not self.cfg.getboolean("Module4_VM", "enabled", fallback=True):
-            logger.info("VM module disabled in configuration.")
-            return True
-        if self.auto_reset_disabled:
-            logger.info("VM auto-reset disabled after repeated failures.")
-            return True
-        if not self.detect_running_vm():
-            logger.info("No managed VM running; snapshot module idle.")
-            return True
+    def _execute_restore(self):
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # 1. Power off (Force Kill)
+                logger.info(f"Powering off VM '{self.vm_name}' (Attempt {attempt+1})...")
+                subprocess.run(['vboxmanage', 'controlvm', self.vm_name, 'poweroff'], capture_output=True)
+                time.sleep(2) # Give it a moment to release locks
+                
+                # 2. Restore Snapshot
+                logger.info(f"Restoring snapshot '{self.clean_snapshot}' for VM '{self.vm_name}'...")
+                res = subprocess.run(['vboxmanage', 'snapshot', self.vm_name, 'restore', self.clean_snapshot], capture_output=True, text=True)
+                if res.returncode != 0:
+                    logger.warning(f"Restore failed: {res.stderr}")
+                    raise Exception(f"VBoxManage restore error: {res.stderr}")
+                
+                # 3. Start VM Headless (or GUI, but headless is safer for automated recovery)
+                logger.info(f"Starting VM '{self.vm_name}'...")
+                res = subprocess.run(['vboxmanage', 'startvm', self.vm_name, '--type', 'headless'], capture_output=True, text=True)
+                if res.returncode != 0:
+                    raise Exception(f"VBoxManage start error: {res.stderr}")
+                
+                logger.info("VM Restore Complete.")
+                return True
+                
+            except Exception as e:
+                logger.error(f"VM Restore attempt {attempt+1} failed: {e}")
+                time.sleep(5)
+                
+        logger.critical("FAILED TO RESTORE VM AFTER 3 ATTEMPTS. Disabling Auto-Reset.")
+        self.enabled = False
         return False
 
-    def restore_clean(self, reason: str, after_restore: Optional[Callable[[], None]] = None) -> bool:
-        with self._lock:
-            if self.auto_reset_disabled:
-                return False
-        if self.maybe_skip():
-            return False
-        ok = True
-        msg = ""
-        try:
-            if self.force_kill:
-                self._vbox_poweroff()
-            self._vbox_restore()
-            self._vbox_start()
-        except Exception as exc:
-            ok = False
-            msg = str(exc)
-            logger.exception("VM restore failed: %s", exc)
-        if not ok:
-            self._write_event_log_windows(f"BlackBox VM restore failed: {msg}")
-            with self._lock:
-                self.auto_reset_disabled = True
-            self.on_disabled(msg)
-            return False
-        self.coc.log_event(
-            {
-                "event_type": "VM_RESTORE",
-                "trigger_details": reason,
-                "file_path": "",
-                "sha256_hash": "",
-            }
-        )
-        self.notify("Black Box", "VM has been reset. All unsaved work lost. Malware destroyed.")
-        if after_restore:
-            threading.Timer(self.delay, after_restore).start()
-        return True
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    mod = VMModule()
+    mod.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        mod.stop()
