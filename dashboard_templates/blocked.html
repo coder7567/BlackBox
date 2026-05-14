@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLOCKED BY BLACK BOX</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #111;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+        h1 {
+            color: #ef233c;
+            font-size: 48px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        p {
+            font-size: 18px;
+            color: #e0e1dd;
+            max-width: 600px;
+            line-height: 1.5;
+        }
+        .video-container {
+            margin-top: 30px;
+            border: 4px solid #ef233c;
+            border-radius: 8px;
+            overflow: hidden;
+            background-color: #000;
+        }
+        .warning-icon {
+            font-size: 72px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="warning-icon">⚠️</div>
+    <h1>Access Restricted</h1>
+    <p>This domain has been blocked by the Black Box Security Suite. It is classified as malicious or a typosquatting attempt.</p>
+    
+    <div class="video-container" id="vidContainer">
+        <!-- We serve this from the static path, but since we don't have it locally we will try to load it or fallback to text -->
+        <video id="safetyVideo" width="640" height="360" autoplay loop muted controls onerror="handleVideoError()">
+            <source src="file:///C:/ProgramData/BlackBox/assets/safety.mp4" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+    </div>
+
+    <script>
+        function handleVideoError() {
+            const container = document.getElementById('vidContainer');
+            container.innerHTML = '<div style="padding: 50px; font-size: 36px; font-weight: bold; color: #ef233c;">BLOCKED BY BLACK BOX</div><div style="padding-bottom: 20px; color: #888;">(Safety Training Video Unavailable)</div>';
+        }
+    </script>
+</body>
+</html>
